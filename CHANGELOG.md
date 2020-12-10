@@ -2,6 +2,67 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [1.5.5](https://github.com/aws-actions/configure-aws-credentials/compare/v1.5.4...v1.5.5) (2020-11-24)
+
+### [1.5.4](https://github.com/aws-actions/configure-aws-credentials/compare/v1.5.3...v1.5.4) (2020-10-29)
+
+### [1.5.3](https://github.com/aws-actions/configure-aws-credentials/compare/v1.5.2...v1.5.3) (2020-10-05)
+
+### [1.5.2](https://github.com/aws-actions/configure-aws-credentials/compare/v1.5.1...v1.5.2) (2020-08-25)
+
+### [1.5.1](https://github.com/aws-actions/configure-aws-credentials/compare/v1.5.0...v1.5.1) (2020-08-11)
+
+
+### Bug Fixes
+
+* make GITHUB_REF env var optional ([#82](https://github.com/aws-actions/configure-aws-credentials/issues/82)) ([ba5041f](https://github.com/aws-actions/configure-aws-credentials/commit/ba5041f7bb4990ac5d10d9009de69e639ebee3df)), closes [#92](https://github.com/aws-actions/configure-aws-credentials/issues/92)
+
+## [1.5.0](https://github.com/aws-actions/configure-aws-credentials/compare/v1.4.4...v1.5.0) (2020-07-29)
+
+
+### Features
+
+* Add post-job action cleanup of credentials and region env vars ([#101](https://github.com/aws-actions/configure-aws-credentials/issues/101)) ([d19cafc](https://github.com/aws-actions/configure-aws-credentials/commit/d19cafcdd1be7e3358f84574a00df37af494036a))
+
+
+### Bug Fixes
+
+* Mask assume role response in debug output ([#102](https://github.com/aws-actions/configure-aws-credentials/issues/102)) ([df7d846](https://github.com/aws-actions/configure-aws-credentials/commit/df7d84616183de7ed37e53e1980284a07e56b216))
+
+### [1.4.4](https://github.com/aws-actions/configure-aws-credentials/compare/v1.4.3...v1.4.4) (2020-07-17)
+
+### [1.4.3](https://github.com/aws-actions/configure-aws-credentials/compare/v1.4.2...v1.4.3) (2020-07-14)
+
+
+### Bug Fixes
+
+* Make tagging optional ([#92](https://github.com/aws-actions/configure-aws-credentials/issues/92)) ([baf85d8](https://github.com/aws-actions/configure-aws-credentials/commit/baf85d8be969f190df9bc9153f06958c32ef3828))
+
+### [1.4.2](https://github.com/aws-actions/configure-aws-credentials/compare/v1.4.1...v1.4.2) (2020-06-30)
+
+
+### Bug Fixes
+
+* add comma to set of special characters ([#78](https://github.com/aws-actions/configure-aws-credentials/issues/78)) ([f04843b](https://github.com/aws-actions/configure-aws-credentials/commit/f04843b510a6c8adf77eed907a616cf00a99970d))
+
+### [1.4.1](https://github.com/aws-actions/configure-aws-credentials/compare/v1.4.0...v1.4.1) (2020-06-09)
+
+## [1.4.0](https://github.com/aws-actions/configure-aws-credentials/compare/v1.3.5...v1.4.0) (2020-06-03)
+
+
+### Features
+
+* Refresh and validate credentials after setting env var creds ([#71](https://github.com/aws-actions/configure-aws-credentials/issues/71)) ([472e549](https://github.com/aws-actions/configure-aws-credentials/commit/472e549195ba1f153e9fb72e39dc2a094e5de13e))
+
+### [1.3.5](https://github.com/aws-actions/configure-aws-credentials/compare/v1.3.4...v1.3.5) (2020-05-27)
+
+
+### Bug Fixes
+
+* clear session token env var if present for non-session credentials ([#65](https://github.com/aws-actions/configure-aws-credentials/issues/65)) ([0c2c1f7](https://github.com/aws-actions/configure-aws-credentials/commit/0c2c1f7c129971b6f433551b1f4ba4a6a9cc8b70))
+
+### [1.3.4](https://github.com/aws-actions/configure-aws-credentials/compare/v1.3.3...v1.3.4) (2020-05-18)
+
 ### [1.3.3](https://github.com/aws-actions/configure-aws-credentials/compare/v1.3.2...v1.3.3) (2020-04-02)
 
 ### [1.3.2](https://github.com/aws-actions/configure-aws-credentials/compare/v1.3.1...v1.3.2) (2020-03-18)

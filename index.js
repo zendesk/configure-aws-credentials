@@ -22,15 +22,16 @@ async function assumeRole(params) {
     roleDurationSeconds,
     roleSessionName,
     region,
+    roleSkipSessionTagging
   } = params;
   assert(
       [sourceAccountId, roleToAssume, roleDurationSeconds, roleSessionName, region].every(isDefined),
       "Missing required input when assuming a Role."
   );
 
-  const {GITHUB_REPOSITORY, GITHUB_WORKFLOW, GITHUB_ACTION, GITHUB_ACTOR, GITHUB_REF, GITHUB_SHA} = process.env;
+  const {GITHUB_REPOSITORY, GITHUB_WORKFLOW, GITHUB_ACTION, GITHUB_ACTOR, GITHUB_SHA} = process.env;
   assert(
-      [GITHUB_REPOSITORY, GITHUB_WORKFLOW, GITHUB_ACTION, GITHUB_ACTOR, GITHUB_REF, GITHUB_SHA].every(isDefined),
+      [GITHUB_REPOSITORY, GITHUB_WORKFLOW, GITHUB_ACTION, GITHUB_ACTOR, GITHUB_SHA].every(isDefined),
       'Missing required environment value. Are you running in GitHub Actions?'
   );
 
@@ -41,20 +42,26 @@ async function assumeRole(params) {
     // Supports only 'aws' partition. Customers in other partitions ('aws-cn') will need to provide full ARN
     roleArn = `arn:aws:iam::${sourceAccountId}:role/${roleArn}`;
   }
+  const tagArray = [
+    {Key: 'GitHub', Value: 'Actions'},
+    {Key: 'Repository', Value: GITHUB_REPOSITORY},
+    {Key: 'Workflow', Value: sanitizeGithubWorkflowName(GITHUB_WORKFLOW)},
+    {Key: 'Action', Value: GITHUB_ACTION},
+    {Key: 'Actor', Value: sanitizeGithubActor(GITHUB_ACTOR)},
+    {Key: 'Commit', Value: GITHUB_SHA},
+  ];
+
+  if (isDefined(process.env.GITHUB_REF)) {
+    tagArray.push({Key: 'Branch', Value: process.env.GITHUB_REF});
+  }
+
+  const roleSessionTags = roleSkipSessionTagging ? undefined : tagArray;
 
   const assumeRoleRequest = {
     RoleArn: roleArn,
     RoleSessionName: roleSessionName,
     DurationSeconds: roleDurationSeconds,
-    Tags: [
-      {Key: 'GitHub', Value: 'Actions'},
-      {Key: 'Repository', Value: GITHUB_REPOSITORY},
-      {Key: 'Workflow', Value: sanitizeGithubWorkflowName(GITHUB_WORKFLOW)},
-      {Key: 'Action', Value: GITHUB_ACTION},
-      {Key: 'Actor', Value: sanitizeGithubActor(GITHUB_ACTOR)},
-      {Key: 'Branch', Value: GITHUB_REF},
-      {Key: 'Commit', Value: GITHUB_SHA},
-    ]
+    Tags: roleSessionTags
   };
 
   if (roleExternalId) {
@@ -82,7 +89,7 @@ function sanitizeGithubWorkflowName(name) {
   // Workflow names can be almost any valid UTF-8 string, but tags are more restrictive.
   // This replaces anything not conforming to the tag restrictions by inverting the regular expression.
   // See the AWS documentation for constraint specifics https://docs.aws.amazon.com/STS/latest/APIReference/API_Tag.html.
-  const nameWithoutSpecialCharacters = name.replace(/[^\p{L}\p{Z}\p{N}_.:/=+-@]/gu, SANITIZATION_CHARACTER);
+  const nameWithoutSpecialCharacters = name.replace(/[^\p{L}\p{Z}\p{N}_:/=+.-@-]/gu, SANITIZATION_CHARACTER);
   const nameTruncated = nameWithoutSpecialCharacters.slice(0, MAX_TAG_VALUE_LENGTH)
   return nameTruncated
 }
@@ -94,19 +101,22 @@ function exportCredentials(params){
 
   // AWS_ACCESS_KEY_ID:
   // Specifies an AWS access key associated with an IAM user or role
-  core.exportVariable('AWS_ACCESS_KEY_ID', accessKeyId);
   core.setSecret(accessKeyId);
+  core.exportVariable('AWS_ACCESS_KEY_ID', accessKeyId);
 
   // AWS_SECRET_ACCESS_KEY:
   // Specifies the secret key associated with the access key. This is essentially the "password" for the access key.
-  core.exportVariable('AWS_SECRET_ACCESS_KEY', secretAccessKey);
   core.setSecret(secretAccessKey);
+  core.exportVariable('AWS_SECRET_ACCESS_KEY', secretAccessKey);
 
   // AWS_SESSION_TOKEN:
   // Specifies the session token value that is required if you are using temporary security credentials.
   if (sessionToken) {
-    core.exportVariable('AWS_SESSION_TOKEN', sessionToken);
     core.setSecret(sessionToken);
+    core.exportVariable('AWS_SESSION_TOKEN', sessionToken);
+  } else if (process.env.AWS_SESSION_TOKEN) {
+    // clear session token from previous credentials action
+    core.exportVariable('AWS_SESSION_TOKEN', '');
   }
 }
 
@@ -122,11 +132,55 @@ async function exportAccountId(maskAccountId, region) {
   const sts = getStsClient(region);
   const identity = await sts.getCallerIdentity().promise();
   const accountId = identity.Account;
-  core.setOutput('aws-account-id', accountId);
   if (!maskAccountId || maskAccountId.toLowerCase() == 'true') {
     core.setSecret(accountId);
   }
+  core.setOutput('aws-account-id', accountId);
   return accountId;
+}
+
+function loadCredentials() {
+  // Force the SDK to re-resolve credentials with the default provider chain.
+  //
+  // This action typically sets credentials in the environment via environment variables.
+  // The SDK never refreshes those env-var-based credentials after initial load.
+  // In case there were already env-var creds set in the actions environment when this action
+  // loaded, this action needs to refresh the SDK creds after overwriting those environment variables.
+  //
+  // The credentials object needs to be entirely recreated (instead of simply refreshed),
+  // because the credential object type could change when this action writes env var creds.
+  // For example, the first load could return EC2 instance metadata credentials
+  // in a self-hosted runner, and the second load could return environment credentials
+  // from an assume-role call in this action.
+  aws.config.credentials = null;
+
+  return new Promise((resolve, reject) => {
+    aws.config.getCredentials((err) => {
+      if (err) {
+        reject(err);
+      }
+      resolve(aws.config.credentials);
+    })
+  });
+}
+
+async function validateCredentials(expectedAccessKeyId) {
+  let credentials;
+  try {
+    credentials = await loadCredentials();
+
+    if (!credentials.accessKeyId) {
+      throw new Error('Access key ID empty after loading credentials');
+    }
+  } catch (error) {
+    throw new Error(`Credentials could not be loaded, please check your action inputs: ${error.message}`);
+  }
+
+  const actualAccessKeyId = credentials.accessKeyId;
+
+  if (expectedAccessKeyId && expectedAccessKeyId != actualAccessKeyId) {
+    throw new Error('Unexpected failure: Credentials loaded by the SDK do not match the access key ID configured by the action');
+  }
 }
 
 function getStsClient(region) {
@@ -149,7 +203,8 @@ async function run() {
     const roleExternalId = core.getInput('role-external-id', { required: false });
     const roleDurationSeconds = core.getInput('role-duration-seconds', {required: false}) || MAX_ACTION_RUNTIME;
     const roleSessionName = core.getInput('role-session-name', { required: false }) || ROLE_SESSION_NAME;
-
+    const roleSkipSessionTagging = core.getInput('role-skip-session-tagging', { required: false });
+  
     if (!region.match(REGION_REGEX)) {
       throw new Error(`Region is not valid: ${region}`);
     }
@@ -169,6 +224,13 @@ async function run() {
       exportCredentials({accessKeyId, secretAccessKey, sessionToken});
     }
 
+    // Regardless of whether any source credentials were provided as inputs,
+    // validate that the SDK can actually pick up credentials.  This validates
+    // cases where this action is on a self-hosted runner that doesn't have credentials
+    // configured correctly, and cases where the user intended to provide input
+    // credentials but the secrets inputs resolved to empty strings.
+    await validateCredentials(accessKeyId);
+
     const sourceAccountId = await exportAccountId(maskAccountId, region);
 
     // Get role credentials if configured to do so
@@ -179,9 +241,11 @@ async function run() {
         roleToAssume,
         roleExternalId,
         roleDurationSeconds,
-        roleSessionName
+        roleSessionName,
+        roleSkipSessionTagging
       });
       exportCredentials(roleCredentials);
+      await validateCredentials(roleCredentials.accessKeyId);
       await exportAccountId(maskAccountId, region);
     }
   }

@@ -1,7 +1,7 @@
 const core = require('@actions/core');
 const assert = require('assert');
-
-const run = require('.');
+const aws = require('aws-sdk');
+const run = require('./index.js');
 
 jest.mock('@actions/core');
 
@@ -22,8 +22,8 @@ const ENVIRONMENT_VARIABLE_OVERRIDES = {
     GITHUB_WORKFLOW: 'MY-WORKFLOW-ID',
     GITHUB_ACTION: 'MY-ACTION-NAME',
     GITHUB_ACTOR: 'MY-USERNAME[bot]',
-    GITHUB_REF: 'MY-BRANCH',
     GITHUB_SHA: 'MY-COMMIT-ID',
+    GITHUB_REF: 'MY-BRANCH',
 };
 const GITHUB_ACTOR_SANITIZED = 'MY-USERNAME_bot_'
 
@@ -49,6 +49,9 @@ const mockStsAssumeRole = jest.fn();
 
 jest.mock('aws-sdk', () => {
     return {
+        config: {
+            getCredentials: jest.fn()
+        },
         STS: jest.fn(() => ({
             getCallerIdentity: mockStsCallerIdentity,
             assumeRole: mockStsAssumeRole,
@@ -80,6 +83,27 @@ describe('Configure AWS Credentials', () => {
                 promise() {
                    return Promise.resolve({ Account: FAKE_ROLE_ACCOUNT_ID });
                 }
+            });
+
+        aws.config.getCredentials.mockReset();
+        aws.config.getCredentials
+            .mockImplementationOnce(callback => {
+                if (!aws.config.credentials) {
+                    aws.config.credentials = {
+                        accessKeyId: FAKE_ACCESS_KEY_ID,
+                        secretAccessKey: FAKE_SECRET_ACCESS_KEY
+                    }
+                }
+                callback(null);
+            })
+            .mockImplementationOnce(callback => {
+                if (!aws.config.credentials) {
+                    aws.config.credentials = {
+                        accessKeyId: FAKE_STS_ACCESS_KEY_ID,
+                        secretAccessKey: FAKE_STS_SECRET_ACCESS_KEY
+                    }
+                }
+                callback(null);
             });
 
         mockStsAssumeRole.mockImplementation(() => {
@@ -118,6 +142,26 @@ describe('Configure AWS Credentials', () => {
         expect(core.setSecret).toHaveBeenCalledWith(FAKE_ACCOUNT_ID);
     });
 
+    test('action fails when github env vars are not set', async () => {
+        process.env.SHOW_STACK_TRACE = 'false';
+        core.getInput = jest
+            .fn()
+            .mockImplementation(mockGetInput(ASSUME_ROLE_INPUTS));
+        delete process.env.GITHUB_SHA;
+
+        await run();
+        expect(core.setFailed).toHaveBeenCalledWith('Missing required environment value. Are you running in GitHub Actions?');
+    });
+
+    test('action does not require GITHUB_REF env var', async () => {
+        core.getInput = jest
+            .fn()
+            .mockImplementation(mockGetInput(ASSUME_ROLE_INPUTS));
+        delete process.env.GITHUB_REF;
+
+        await run();
+    });
+
     test('hosted runners can pull creds from a self-hosted environment', async () => {
         const mockInputs = {'aws-region': FAKE_REGION};
         core.getInput = jest
@@ -132,6 +176,59 @@ describe('Configure AWS Credentials', () => {
         expect(core.exportVariable).toHaveBeenCalledWith('AWS_REGION', FAKE_REGION);
         expect(core.setOutput).toHaveBeenCalledWith('aws-account-id', FAKE_ACCOUNT_ID);
         expect(core.setSecret).toHaveBeenCalledWith(FAKE_ACCOUNT_ID);
+    });
+
+    test('action with no accessible credentials fails', async () => {
+        process.env.SHOW_STACK_TRACE = 'false';
+        const mockInputs = {'aws-region': FAKE_REGION};
+        core.getInput = jest
+            .fn()
+            .mockImplementation(mockGetInput(mockInputs));
+        aws.config.getCredentials.mockReset();
+        aws.config.getCredentials.mockImplementation(callback => {
+            callback(new Error('No credentials to load'));
+        });
+
+        await run();
+
+        expect(core.setFailed).toHaveBeenCalledWith("Credentials could not be loaded, please check your action inputs: No credentials to load");
+    });
+
+    test('action with empty credentials fails', async () => {
+        process.env.SHOW_STACK_TRACE = 'false';
+        const mockInputs = {'aws-region': FAKE_REGION};
+        core.getInput = jest
+            .fn()
+            .mockImplementation(mockGetInput(mockInputs));
+        aws.config.getCredentials.mockReset();
+        aws.config.getCredentials.mockImplementation(callback => {
+            aws.config.credentials = {
+                accessKeyId: ''
+            }
+            callback(null);
+        });
+
+        await run();
+
+        expect(core.setFailed).toHaveBeenCalledWith("Credentials could not be loaded, please check your action inputs: Access key ID empty after loading credentials");
+    });
+
+    test('action fails when credentials are not set in the SDK correctly', async () => {
+        process.env.SHOW_STACK_TRACE = 'false';
+        core.getInput = jest
+            .fn()
+            .mockImplementation(mockGetInput(ASSUME_ROLE_INPUTS));
+        aws.config.getCredentials.mockReset();
+        aws.config.getCredentials.mockImplementation(callback => {
+            aws.config.credentials = {
+                accessKeyId: FAKE_ACCESS_KEY_ID
+            }
+            callback(null);
+        });
+
+        await run();
+
+        expect(core.setFailed).toHaveBeenCalledWith("Unexpected failure: Credentials loaded by the SDK do not match the access key ID configured by the action");
     });
 
     test('session token is optional', async () => {
@@ -154,6 +251,38 @@ describe('Configure AWS Credentials', () => {
         expect(core.setSecret).toHaveBeenCalledWith(FAKE_ACCOUNT_ID);
     });
 
+    test('existing env var creds are cleared', async () => {
+        const mockInputs = {...CREDS_INPUTS, 'aws-region': 'eu-west-1'};
+        core.getInput = jest
+            .fn()
+            .mockImplementation(mockGetInput(mockInputs));
+        process.env.AWS_ACCESS_KEY_ID = 'foo';
+        process.env.AWS_SECRET_ACCESS_KEY = 'bar';
+        process.env.AWS_SESSION_TOKEN = 'helloworld';
+        aws.config.credentials = {
+            accessKeyId: 'foo',
+            secretAccessKey: 'bar',
+            sessionToken: 'helloworld'
+        };
+
+        await run();
+        expect(mockStsAssumeRole).toHaveBeenCalledTimes(0);
+        expect(core.exportVariable).toHaveBeenCalledTimes(5);
+        expect(core.setSecret).toHaveBeenCalledTimes(3);
+        expect(core.exportVariable).toHaveBeenCalledWith('AWS_ACCESS_KEY_ID', FAKE_ACCESS_KEY_ID);
+        expect(core.setSecret).toHaveBeenCalledWith(FAKE_ACCESS_KEY_ID);
+        expect(core.exportVariable).toHaveBeenCalledWith('AWS_SECRET_ACCESS_KEY', FAKE_SECRET_ACCESS_KEY);
+        expect(core.setSecret).toHaveBeenCalledWith(FAKE_SECRET_ACCESS_KEY);
+        expect(core.exportVariable).toHaveBeenCalledWith('AWS_SESSION_TOKEN', '');
+        expect(core.exportVariable).toHaveBeenCalledWith('AWS_DEFAULT_REGION', 'eu-west-1');
+        expect(core.exportVariable).toHaveBeenCalledWith('AWS_REGION', 'eu-west-1');
+        expect(core.setOutput).toHaveBeenCalledWith('aws-account-id', FAKE_ACCOUNT_ID);
+        expect(core.setSecret).toHaveBeenCalledWith(FAKE_ACCOUNT_ID);
+        expect(aws.config.credentials.accessKeyId).toBe(FAKE_ACCESS_KEY_ID);
+        expect(aws.config.credentials.secretAccessKey).toBe(FAKE_SECRET_ACCESS_KEY);
+        expect(aws.config.credentials.sessionToken).toBeUndefined();
+    });
+
     test('validates region name', async () => {
         process.env.SHOW_STACK_TRACE = 'false';
 
@@ -165,6 +294,19 @@ describe('Configure AWS Credentials', () => {
         await run();
 
         expect(core.setFailed).toHaveBeenCalledWith('Region is not valid: $AWS_REGION');
+    });
+
+    test('throws error if access key id exists but missing secret access key', async () => {
+        process.env.SHOW_STACK_TRACE = 'false';
+        const inputsWIthoutSecretKey = {...ASSUME_ROLE_INPUTS}
+        inputsWIthoutSecretKey["aws-secret-access-key"] = undefined
+        core.getInput = jest
+            .fn()
+            .mockImplementation(mockGetInput(inputsWIthoutSecretKey));
+
+        await run();
+        expect(core.setFailed).toHaveBeenCalledWith("'aws-secret-access-key' must be provided if 'aws-access-key-id' is provided");
+
     });
 
     test('can opt out of masking account ID', async () => {
@@ -293,8 +435,8 @@ describe('Configure AWS Credentials', () => {
                 {Key: 'Workflow', Value: ENVIRONMENT_VARIABLE_OVERRIDES.GITHUB_WORKFLOW},
                 {Key: 'Action', Value: ENVIRONMENT_VARIABLE_OVERRIDES.GITHUB_ACTION},
                 {Key: 'Actor', Value: GITHUB_ACTOR_SANITIZED},
-                {Key: 'Branch', Value: ENVIRONMENT_VARIABLE_OVERRIDES.GITHUB_REF},
                 {Key: 'Commit', Value: ENVIRONMENT_VARIABLE_OVERRIDES.GITHUB_SHA},
+                {Key: 'Branch', Value: ENVIRONMENT_VARIABLE_OVERRIDES.GITHUB_REF},
             ]
         })
     });
@@ -315,8 +457,8 @@ describe('Configure AWS Credentials', () => {
                 {Key: 'Workflow', Value: ENVIRONMENT_VARIABLE_OVERRIDES.GITHUB_WORKFLOW},
                 {Key: 'Action', Value: ENVIRONMENT_VARIABLE_OVERRIDES.GITHUB_ACTION},
                 {Key: 'Actor', Value: GITHUB_ACTOR_SANITIZED},
-                {Key: 'Branch', Value: ENVIRONMENT_VARIABLE_OVERRIDES.GITHUB_REF},
                 {Key: 'Commit', Value: ENVIRONMENT_VARIABLE_OVERRIDES.GITHUB_SHA},
+                {Key: 'Branch', Value: ENVIRONMENT_VARIABLE_OVERRIDES.GITHUB_REF},
             ]
         })
     });
@@ -337,8 +479,8 @@ describe('Configure AWS Credentials', () => {
                 {Key: 'Workflow', Value: ENVIRONMENT_VARIABLE_OVERRIDES.GITHUB_WORKFLOW},
                 {Key: 'Action', Value: ENVIRONMENT_VARIABLE_OVERRIDES.GITHUB_ACTION},
                 {Key: 'Actor', Value: GITHUB_ACTOR_SANITIZED},
-                {Key: 'Branch', Value: ENVIRONMENT_VARIABLE_OVERRIDES.GITHUB_REF},
                 {Key: 'Commit', Value: ENVIRONMENT_VARIABLE_OVERRIDES.GITHUB_SHA},
+                {Key: 'Branch', Value: ENVIRONMENT_VARIABLE_OVERRIDES.GITHUB_REF},
             ]
         })
     });
@@ -359,8 +501,8 @@ describe('Configure AWS Credentials', () => {
                 {Key: 'Workflow', Value: ENVIRONMENT_VARIABLE_OVERRIDES.GITHUB_WORKFLOW},
                 {Key: 'Action', Value: ENVIRONMENT_VARIABLE_OVERRIDES.GITHUB_ACTION},
                 {Key: 'Actor', Value: GITHUB_ACTOR_SANITIZED},
-                {Key: 'Branch', Value: ENVIRONMENT_VARIABLE_OVERRIDES.GITHUB_REF},
                 {Key: 'Commit', Value: ENVIRONMENT_VARIABLE_OVERRIDES.GITHUB_SHA},
+                {Key: 'Branch', Value: ENVIRONMENT_VARIABLE_OVERRIDES.GITHUB_REF},
             ]
         })
     });
@@ -381,8 +523,8 @@ describe('Configure AWS Credentials', () => {
                 {Key: 'Workflow', Value: ENVIRONMENT_VARIABLE_OVERRIDES.GITHUB_WORKFLOW},
                 {Key: 'Action', Value: ENVIRONMENT_VARIABLE_OVERRIDES.GITHUB_ACTION},
                 {Key: 'Actor', Value: GITHUB_ACTOR_SANITIZED},
-                {Key: 'Branch', Value: ENVIRONMENT_VARIABLE_OVERRIDES.GITHUB_REF},
                 {Key: 'Commit', Value: ENVIRONMENT_VARIABLE_OVERRIDES.GITHUB_SHA},
+                {Key: 'Branch', Value: ENVIRONMENT_VARIABLE_OVERRIDES.GITHUB_REF},
             ],
             ExternalId: 'abcdef'
         })
@@ -395,7 +537,7 @@ describe('Configure AWS Credentials', () => {
 
         process.env = {...process.env, GITHUB_WORKFLOW: 'Workflow!"#$%&\'()*+, -./:;<=>?@[]^_`{|}~🙂💥🍌1yFvMOeD3ZHYsHrGjCceOboMYzBPo0CRNFdcsVRG6UgR3A912a8KfcBtEVvkAS7kRBq80umGff8mux5IN1y55HQWPNBNyaruuVr4islFXte4FDQZexGJRUSMyHQpxJ8OmZnET84oDmbvmIjgxI6IBrdihX9PHMapT4gQvRYnLqNiKb18rEMWDNoZRy51UPX5sWK2GKPipgKSO9kqLckZai9D2AN2RlWCxtMqChNtxuxjqeqhoQZo0oaq39sjcRZgAAAAAAA'};
 
-        const sanitizedWorkflowName = 'Workflow__________+, -./:;<=>?@____________1yFvMOeD3ZHYsHrGjCceOboMYzBPo0CRNFdcsVRG6UgR3A912a8KfcBtEVvkAS7kRBq80umGff8mux5IN1y55HQWPNBNyaruuVr4islFXte4FDQZexGJRUSMyHQpxJ8OmZnET84oDmbvmIjgxI6IBrdihX9PHMapT4gQvRYnLqNiKb18rEMWDNoZRy51UPX5sWK2GKPipgKSO9kqLckZa'
+        const sanitizedWorkflowName = 'Workflow__________+_ -./:;<=>?@____________1yFvMOeD3ZHYsHrGjCceOboMYzBPo0CRNFdcsVRG6UgR3A912a8KfcBtEVvkAS7kRBq80umGff8mux5IN1y55HQWPNBNyaruuVr4islFXte4FDQZexGJRUSMyHQpxJ8OmZnET84oDmbvmIjgxI6IBrdihX9PHMapT4gQvRYnLqNiKb18rEMWDNoZRy51UPX5sWK2GKPipgKSO9kqLckZa'
 
         await run();
         expect(mockStsAssumeRole).toHaveBeenCalledWith({
@@ -408,10 +550,90 @@ describe('Configure AWS Credentials', () => {
                 {Key: 'Workflow', Value: sanitizedWorkflowName},
                 {Key: 'Action', Value: ENVIRONMENT_VARIABLE_OVERRIDES.GITHUB_ACTION},
                 {Key: 'Actor', Value: GITHUB_ACTOR_SANITIZED},
-                {Key: 'Branch', Value: ENVIRONMENT_VARIABLE_OVERRIDES.GITHUB_REF},
                 {Key: 'Commit', Value: ENVIRONMENT_VARIABLE_OVERRIDES.GITHUB_SHA},
+                {Key: 'Branch', Value: ENVIRONMENT_VARIABLE_OVERRIDES.GITHUB_REF},
             ]
         })
+    });
+
+    test('skip tagging provided as true', async () => {
+        core.getInput = jest
+            .fn()
+            .mockImplementation(mockGetInput({...ASSUME_ROLE_INPUTS, 'role-skip-session-tagging': true}));
+
+        await run();
+        expect(mockStsAssumeRole).toHaveBeenCalledWith({
+            RoleArn: ROLE_ARN,
+            RoleSessionName: 'GitHubActions',
+            DurationSeconds: 21600,
+            Tags: undefined
+        })
+    });
+
+    test('skip tagging provided as false', async () => {
+        core.getInput = jest
+            .fn()
+            .mockImplementation(mockGetInput({...ASSUME_ROLE_INPUTS, 'role-skip-session-tagging': false}));
+
+        await run();
+        expect(mockStsAssumeRole).toHaveBeenCalledWith({
+            RoleArn: ROLE_ARN,
+            RoleSessionName: 'GitHubActions',
+            DurationSeconds: 21600,
+            Tags: [
+                {Key: 'GitHub', Value: 'Actions'},
+                {Key: 'Repository', Value: ENVIRONMENT_VARIABLE_OVERRIDES.GITHUB_REPOSITORY},
+                {Key: 'Workflow', Value: ENVIRONMENT_VARIABLE_OVERRIDES.GITHUB_WORKFLOW},
+                {Key: 'Action', Value: ENVIRONMENT_VARIABLE_OVERRIDES.GITHUB_ACTION},
+                {Key: 'Actor', Value: GITHUB_ACTOR_SANITIZED},
+                {Key: 'Commit', Value: ENVIRONMENT_VARIABLE_OVERRIDES.GITHUB_SHA},
+                {Key: 'Branch', Value: ENVIRONMENT_VARIABLE_OVERRIDES.GITHUB_REF},
+            ]
+        })
+    });
+
+    test('skip tagging not provided', async () => {
+        core.getInput = jest
+            .fn()
+            .mockImplementation(mockGetInput({...ASSUME_ROLE_INPUTS}));
+
+        await run();
+        expect(mockStsAssumeRole).toHaveBeenCalledWith({
+            RoleArn: ROLE_ARN,
+            RoleSessionName: 'GitHubActions',
+            DurationSeconds: 21600,
+            Tags: [
+                {Key: 'GitHub', Value: 'Actions'},
+                {Key: 'Repository', Value: ENVIRONMENT_VARIABLE_OVERRIDES.GITHUB_REPOSITORY},
+                {Key: 'Workflow', Value: ENVIRONMENT_VARIABLE_OVERRIDES.GITHUB_WORKFLOW},
+                {Key: 'Action', Value: ENVIRONMENT_VARIABLE_OVERRIDES.GITHUB_ACTION},
+                {Key: 'Actor', Value: GITHUB_ACTOR_SANITIZED},
+                {Key: 'Commit', Value: ENVIRONMENT_VARIABLE_OVERRIDES.GITHUB_SHA},
+                {Key: 'Branch', Value: ENVIRONMENT_VARIABLE_OVERRIDES.GITHUB_REF},
+            ]
+        })
+    });
+
+    test('masks variables before exporting', async () => {
+        let maskedValues = [];
+        const publicFields = ['AWS_REGION', 'AWS_DEFAULT_REGION'];
+        core.setSecret.mockReset();
+        core.setSecret.mockImplementation((secret) => {
+            maskedValues.push(secret);
+        });
+
+        core.exportVariable.mockReset();
+        core.exportVariable.mockImplementation((name, value) => {
+            if (!maskedValues.includes(value) && !publicFields.includes(name)) {
+                throw new Error(value + " for variable " + name + " is not masked yet!");
+            }
+        });
+
+        core.getInput = jest
+            .fn()
+            .mockImplementation(mockGetInput(ASSUME_ROLE_INPUTS));
+
+        await run();
     });
 
 });
